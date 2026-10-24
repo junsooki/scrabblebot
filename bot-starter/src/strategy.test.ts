@@ -18,6 +18,12 @@ test("chooseWord picks the longest word the rack can spell", () => {
   assert.equal(chooseWord({ myRack: rack("CX"), dictionary }), null);
 });
 
+test("chooseWord prefers the higher score over the longer word", () => {
+  // QUIZ: 22 * 1.5 = 33; QUOTA: 14 * 2 = 28.
+  const dictionary = ["QUOTA", "QUIZ"];
+  assert.equal(chooseWord({ myRack: rack("QUIZOTA"), dictionary }), "QUIZ");
+});
+
 // The bot can't see a match move on while it searches, so a slow search
 // means bids on closed auctions and words from letters it already spent.
 test("chooseWord searches the whole wordlist well within an auction", () => {

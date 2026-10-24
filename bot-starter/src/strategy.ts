@@ -39,12 +39,15 @@ export interface Theta {
   lottery: number;     // floor bid on every letter early on
   playK: number;       // playable words compared when deciding to play
   epsilon: number;     // play when equity is within this of holding
+  minPlayLen: number;  // shortest word worth playing before the endgame
+  floorK: number;      // floor bid as a share of the letter's market price
 }
 
 export const DEFAULT_THETA: Theta = {
   alpha0: 1.7, alphaMin: 1, alphaMax: 4, eta: 0.08, rho0: 0.5,
   omega: [0.45, 0.4, 0.35], pi: [12, 19, 32], gamma: 0.7, maxMissing: 2,
   topN: 64, kEnd: 8, kappa: 1.5, lottery: 2, playK: 6, epsilon: 1,
+  minPlayLen: 6, floorK: 0.9,
 };
 
 const STARTING_RACK = 5;
@@ -127,7 +130,10 @@ export class MatchBrain {
     const { kEnd, kappa, lottery } = this.theta;
     let a = this.alpha;
     if (lettersLeft <= kEnd) a *= 1 + (kappa * (kEnd - lettersLeft)) / kEnd;
-    let bid = Math.round(Math.max(0, gain) * a);
+    // Never bid far below the market (about 9 + 2.4 × letter value): an
+    // empty-ish rack sees little gain in any one letter but still needs tiles.
+    const market = (9 + 2.4 * LETTER_VALUE[letter]) * (a / this.theta.alpha0);
+    let bid = Math.round(Math.max(gain * a, this.theta.floorK * market));
     // Money is worthless once the bag is empty: late, spend it on anything useful.
     if (lettersLeft <= kEnd && gain > 0) bid = Math.max(bid, Math.floor(balance / lettersLeft));
     if (lettersLeft > 15) bid = Math.max(bid, lottery);
@@ -137,7 +143,11 @@ export class MatchBrain {
   word(rack: Map<string, number>, balance: number, lettersLeft: number): string | null {
     const r = rackCounts(rack);
     this.setRack(r);
-    const playable = this.playable(r);
+    const endgame = lettersLeft <= this.theta.kEnd;
+    // Before the endgame, short words just burn tiles a long word needs.
+    const playable = this.playable(r).filter(
+      (i) => endgame || this.index.lens[i] >= this.theta.minPlayLen,
+    );
     if (playable.length === 0) return null;
     // Last chance: the tile won now is only playable while the final auction
     // runs, and nothing is playable after. Cash in everything, best first.

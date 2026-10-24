@@ -89,6 +89,19 @@ function rackForMatch(
   return rack;
 }
 
+// Tiles left in the bag and bots seated, for pacing.
+function matchInfo(
+  conn: DbConnection,
+  matchId: bigint,
+): { lettersLeft: number; players: number } {
+  const m = conn.db.matchState.id.find(matchId);
+  let players = 0;
+  for (const p of conn.db.matchParticipant.iter()) {
+    if (p.matchId === matchId) players++;
+  }
+  return { lettersLeft: m?.bagTotal ?? 0, players: Math.max(1, players) };
+}
+
 function participantForMatch(
   conn: DbConnection,
   matchId: bigint,
@@ -128,6 +141,8 @@ function tryBid(
     letter,
     myBalance: participant.balance,
     myRack: rackForMatch(conn, matchId),
+    dictionary: DICTIONARY,
+    ...matchInfo(conn, matchId),
   });
   if (amount <= 0) return;
   conn.reducers
@@ -157,6 +172,8 @@ function tryPlayWord(conn: DbConnection) {
     const word = chooseWord({
       myRack: rackForMatch(conn, matchId),
       dictionary: DICTIONARY,
+      myBalance: participantForMatch(conn, matchId)?.balance ?? 0,
+      ...matchInfo(conn, matchId),
     });
     if (!word) continue;
     console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
@@ -217,7 +234,11 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     .subscribeToAllTables();
 
   conn.db.auction.onInsert((_ctx: EventContext, a) => {
-    if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
+    if (a.status.tag !== "Open") return;
+    tryBid(conn, a.id, a.matchId, a.letter);
+    // The bag shrinks every auction, which can turn a held rack into a
+    // play (see chooseWord), so look again even if the rack didn't change.
+    if (participantForMatch(conn, a.matchId)) tryPlayWord(conn);
   });
   conn.db.myRack.onInsert(() => tryPlayWord(conn));
   conn.db.myRack.onUpdate(() => tryPlayWord(conn));

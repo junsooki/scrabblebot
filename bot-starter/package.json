@@ -5,17 +5,23 @@
   "type": "module",
   "scripts": {
     "generate": "npm install --prefix ../spacetimedb && spacetime generate --lang typescript --out-dir src/module_bindings --module-path ../spacetimedb",
+    "build:native": "node scripts/build-native.mjs",
+    "prestart": "npm run build:native",
     "start": "tsx src/index.ts",
+    "pretest": "npm run build:native",
     "test": "node --import tsx --test src/strategy.test.ts",
+    "prebuild": "npm run build:native",
     "build": "tsc"
   },
   "dependencies": {
     "spacetimedb": "^2.12.0",
+    "undici": "^6.29.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/ws": "^8.5.0",
+    "node-gyp": "^11.5.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.0"
   }

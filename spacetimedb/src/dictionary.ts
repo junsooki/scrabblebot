@@ -1,22 +1,30 @@
 import WORDLIST from "../wordlist.txt";
 import { asciiUppercase, byteLength, isAsciiUppercase } from "./text";
 
-// The wordlist is bundled into the module as a string. The two word arrays
+// The wordlist is bundled into the module as a string. The data structures
 // below are derived from it on first use and kept for the life of the
 // module instance; they depend only on the constant wordlist.
 //
 //   lexWords()     — the original lex-sorted wordlist (one word per line),
-//                    binary-searched by `isValidWord`.
+//                    used by tests and as the source for other structures.
+//   wordSet()      — a Set of all words for O(1) membership tests by
+//                    `isValidWord`.
 //   wordsByLength() — same words, sorted by length desc then lex asc. Used
 //                    by `findBestPlayable` so the first match is the longest
 //                    playable word and we early-exit when remaining words
 //                    are shorter than `minLen`.
 let LEX_WORDS: string[] | undefined;
+let WORD_SET: Set<string> | undefined;
 let WORDS_BY_LENGTH: string[] | undefined;
 
 export function lexWords(): string[] {
   LEX_WORDS ??= WORDLIST.split("\n").filter((l) => l.length > 0);
   return LEX_WORDS;
+}
+
+function wordSet(): Set<string> {
+  WORD_SET ??= new Set(lexWords());
+  return WORD_SET;
 }
 
 function wordsByLength(): string[] {
@@ -34,21 +42,7 @@ export function isValidWord(word: string): boolean {
   if (!isAsciiUppercase(target)) {
     return false;
   }
-  const words = lexWords();
-  let lo = 0;
-  let hi = words.length;
-  while (lo < hi) {
-    const mid = lo + Math.floor((hi - lo) / 2);
-    const w = words[mid]!;
-    if (w < target) {
-      lo = mid + 1;
-    } else if (w === target) {
-      return true;
-    } else {
-      hi = mid;
-    }
-  }
-  return false;
+  return wordSet().has(target);
 }
 
 const A = "A".charCodeAt(0);

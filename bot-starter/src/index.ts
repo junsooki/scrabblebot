@@ -27,7 +27,13 @@ import {
 import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { chooseWord, decideBid } from "./strategy.js";
+import { chooseWord, decideBid, initializeStrategy } from "./strategy.js";
+
+// Load local bot credentials when running from bot-starter. Shell-provided
+// values still take precedence, and the .env file is intentionally ignored.
+if (fs.existsSync(".env")) {
+  process.loadEnvFile(".env");
+}
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
 const DB_NAME = process.env.STDB_DB ?? "scrabblebot";
@@ -63,7 +69,8 @@ const DICTIONARY: string[] = fs.existsSync(dictionaryPath)
       .map((l) => l.trim().toUpperCase())
       .filter((l) => l.length >= 2)
   : [];
-DICTIONARY.sort((a, b) => b.length - a.length); // longest first for greedy pick
+DICTIONARY.sort((a, b) => b.length - a.length); // longer candidates first
+initializeStrategy(DICTIONARY);
 
 let myIdentity: Identity | null = null;
 let myBotId: bigint | null = null;

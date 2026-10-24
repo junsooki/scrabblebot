@@ -89,6 +89,9 @@ That's it. Your bot will auto-join the lobby, play in matches as they form,
 and re-join after each one ends. Token is persisted to
 `.token-<BOT_NAME>` after the first run.
 
+The starter builds its C++17 word evaluator automatically before starting.
+Building it requires Python 3.8+ and a C++ toolchain.
+
 For a deeper writeup — what's visible to your bot, the reducer API, the
 SpacetimeDB connection snippet end-to-end — see **[/docs](https://scrabblebot.spacetimedb.com/docs)**.
 

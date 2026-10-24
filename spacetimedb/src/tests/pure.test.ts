@@ -67,7 +67,7 @@ test("dictionary accepts words in any case", () => {
   expect(isValidWord("AA")).toBe(true);
   expect(isValidWord("cat")).toBe(true);
   expect(isValidWord("QUIZ")).toBe(true);
-  // First and last entries exercise the binary search's bounds.
+  // First and last entries exercise membership at both ends of the list.
   expect(isValidWord(words[0]!)).toBe(true);
   expect(isValidWord(words[words.length - 1]!)).toBe(true);
 });
@@ -82,7 +82,7 @@ test("dictionary rejects nonwords and junk", () => {
 });
 
 test("wordlist is sorted uppercase and unique", () => {
-  // `isValidWord` binary-searches the raw file, so this must hold.
+  // Keep the source data normalized and ordered for deterministic consumers.
   const outOfOrder = words.findIndex((w, i) => i > 0 && !(words[i - 1]! < w));
   expect(outOfOrder, `out of order at ${words[outOfOrder]}`).toBe(-1);
   expect(words.filter((w) => !/^[A-Z]+$/.test(w))).toEqual([]);

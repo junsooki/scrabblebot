@@ -12,8 +12,8 @@
 // Either way the bot saves its token to .token-<BOT_NAME>, so later runs
 // need only `BOT_NAME=<name> cargo run --release`.
 //
-// Entering a tournament: `TOURNAMENT_ID=<id>` registers the bot when it
-// connects. `THETA=<file>` (default theta.txt here) holds the strategy's
+// Tournaments: the bot registers itself for any tournament that opens for
+// registration (or `TOURNAMENT_ID=<id>`, when it connects). `THETA=<file>` (default theta.txt here) holds the strategy's
 // parameters; it's read at the start of every match, so `cargo run --bin
 // tune` can improve a running bot. THETA=theta-search.txt plays the search
 // strategy, which also needs market.txt and leave.txt (see below).
@@ -58,6 +58,7 @@ struct State {
     bids: HashMap<u64, i64>, // auction id -> amount we bid
     brains: HashMap<u64, Brain>,
     playing: HashSet<u64>, // matches with a word in flight
+    registered: HashSet<u64>, // tournaments we've asked to join
 }
 
 // Callbacks all run on the connection's one thread, so this lock is never
@@ -219,9 +220,24 @@ fn join_lobby(db: &RemoteTables, reducers: &RemoteReducers, st: &State) {
     let _ = reducers.join_lobby_then(log_failure("joining the lobby".into()));
 }
 
+// Sign up for a tournament, once per process. A tournament opening for
+// registration is joined automatically, so the bot enters without anyone
+// restarting it with TOURNAMENT_ID.
+fn register(reducers: &RemoteReducers, st: &mut State, id: u64) {
+    if st.registered.insert(id) {
+        log!("registering for tournament {id}");
+        let _ = reducers.register_for_tournament_then(id, log_failure(format!("registering for tournament {id}")));
+    }
+}
+
 fn bootstrap_activity(db: &RemoteTables, reducers: &RemoteReducers, st: &mut State) {
     if let Some(id) = env("TOURNAMENT_ID").and_then(|t| t.parse().ok()) {
-        let _ = reducers.register_for_tournament_then(id, log_failure(format!("registering for tournament {id}")));
+        register(reducers, st, id);
+    }
+    for t in db.tournament().iter() {
+        if t.status == TournamentStatus::Registration {
+            register(reducers, st, t.id);
+        }
     }
     join_lobby(db, reducers, st);
     for a in db.auction().iter().filter(|a| a.status == AuctionStatus::Open) {
@@ -264,6 +280,7 @@ fn subscribe_as_bot(conn: &impl DbContext<DbView = RemoteTables, Reducers = Remo
             format!("SELECT l.* FROM lobby l JOIN lobby_member lm ON l.id = lm.lobby_id WHERE lm.bot_id = {me}"),
             format!("SELECT * FROM lobby_member WHERE bot_id = {me}"),
             format!("SELECT * FROM bot WHERE id = {me}"),
+            "SELECT * FROM tournament".to_string(),
         ]);
 }
 
@@ -361,6 +378,16 @@ fn on_connect(conn: &DbConnection, identity: Identity, token: &str) {
         // A word paid out: we may afford a higher bid on the open auction.
         if Some(new.bot_id) == st.my_bot_id && new.balance > old.balance {
             rebid(&ctx.db, &ctx.reducers, &mut st, new.match_id);
+        }
+    });
+    conn.db.tournament().on_insert(|ctx, t| {
+        if t.status == TournamentStatus::Registration && !is_replay(&ctx.event) {
+            register(&ctx.reducers, &mut state(), t.id);
+        }
+    });
+    conn.db.tournament().on_update(|ctx, _, t| {
+        if t.status == TournamentStatus::Registration {
+            register(&ctx.reducers, &mut state(), t.id);
         }
     });
     // When a match this bot was in ends, hop back into the lobby.

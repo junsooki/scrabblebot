@@ -57,6 +57,7 @@ pub struct Theta {
     pub endgame: u32,     // solve the last this-many playable auctions exactly (needs a market)
     pub early_k: f64,     // bids are scaled by this while more than early_left auctions are left
     pub early_left: u32,
+    pub early_hot: f64,   // no shading once early prices run above this × the usual (0: always shade)
     pub starve_left: u32,     // starvation in the last this-many auctions (0: off)
     pub starve_bid: [f64; 3], // the price it forces, by tier
     pub max_missing: u32, // furthest target words considered
@@ -98,6 +99,7 @@ impl Default for Theta {
             endgame: 0,
             early_k: 1.0,
             early_left: 45,
+            early_hot: 0.0,
             starve_left: 0,
             starve_bid: [15.0, 24.0, 28.0],
             max_missing: 2,
@@ -115,9 +117,9 @@ impl Default for Theta {
 
 impl Theta {
     // Every parameter by name, as tuned and saved.
-    pub const NAMES: [&'static str; 44] = [
+    pub const NAMES: [&'static str; 45] = [
         "alpha0", "alpha_min", "alpha_max", "eta", "rho0", "omega0", "omega1", "omega2", "pi0", "pi1",
-        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "endgame", "early_k", "early_left", "starve_left", "starve0", "starve1", "starve2", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
+        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "endgame", "early_k", "early_left", "early_hot", "starve_left", "starve0", "starve1", "starve2", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
         "min_play_len", "floor_k",
     ];
 
@@ -154,6 +156,7 @@ impl Theta {
             "endgame" => self.endgame as f64,
             "early_k" => self.early_k,
             "early_left" => self.early_left as f64,
+            "early_hot" => self.early_hot,
             "starve_left" => self.starve_left as f64,
             "starve0" => self.starve_bid[0],
             "starve1" => self.starve_bid[1],
@@ -207,6 +210,7 @@ impl Theta {
             "endgame" => self.endgame = int(0.0, 2.0) as u32,
             "early_k" => self.early_k = v.clamp(0.0, 2.0),
             "early_left" => self.early_left = int(0.0, 67.0) as u32,
+            "early_hot" => self.early_hot = v.clamp(0.0, 5.0),
             "starve_left" => self.starve_left = int(0.0, 67.0) as u32,
             "starve0" => self.starve_bid[0] = v.clamp(0.0, 100.0),
             "starve1" => self.starve_bid[1] = v.clamp(0.0, 100.0),
@@ -277,6 +281,7 @@ pub struct Brain {
     leave: Option<Arc<Leave>>,
     final_scores: HashMap<Rack, f64>, // best_partition totals seen this match
     leader_solvent: bool,
+    early_paid: (f64, f64, u32), // early prices paid, the market's median for those letters, and how many
 }
 
 impl Brain {
@@ -301,6 +306,7 @@ impl Brain {
             leave: None,
             final_scores: HashMap::new(),
             leader_solvent: false,
+            early_paid: (0.0, 0.0, 0),
         }
     }
 
@@ -339,6 +345,12 @@ impl Brain {
         }
         let Some(winner) = winner else { return };
         self.won.entry(winner).or_insert([0; 26])[letter as usize] += 1;
+        if letters_left > self.theta.early_left {
+            if let Some(market) = &self.market {
+                let e = &mut self.early_paid;
+                *e = (e.0 + paid, e.1 + market.quantile(letter as usize, 0.5), e.2 + 1);
+            }
+        }
         let t = tier(letter as usize);
         self.prices[t] = 0.7 * self.theta.pi[t] + 0.3 * (0.8 * self.prices[t] + 0.2 * paid);
         // Pacing: nudge the exchange rate toward spending our money (plus what
@@ -366,7 +378,11 @@ impl Brain {
         let bid = self.bid_unshaded(letter, rack, balance, letters_left);
         // The top late-game bots buy little while racks are still forming
         // and keep their coins for the tiles that finish words.
-        if letters_left > self.theta.early_left {
+        // Unless this table pays well over the usual early on: then shading
+        // only starves us while the others build their racks.
+        let (paid, usual, n) = self.early_paid;
+        let hot = self.theta.early_hot > 0.0 && n >= 3 && paid > self.theta.early_hot * usual;
+        if letters_left > self.theta.early_left && !hot {
             return (bid as f64 * self.theta.early_k).round() as i64;
         }
         // Starvation: late, while the leading rival can still pay, make it

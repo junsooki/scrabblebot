@@ -1,14 +1,14 @@
-# held out: placement 0.5585, win rate 0.128, score 80.3 (1224 seats)
+# held out: placement 0.5587, win rate 0.128, score 80.3 (1224 seats)
 alpha0 = 1.7
 alpha_min = 1
 alpha_max = 3.6201959667198307
 eta = 0.08
 rho0 = 0.5
 omega0 = 0.45
-omega1 = 0.4
+omega1 = 0.5126018032278662
 omega2 = 0.35
 pi0 = 13.932658974906461
-pi1 = 21.193243098686303
+pi1 = 22.97164457304213
 pi2 = 32
 gamma = 0.7
 stack = 3
@@ -25,12 +25,11 @@ sim_reserve = 0.6
 sim_dump = 0.5
 sim_coins = 20
 sim_floor = 1
-short_score = 1000
 max_missing = 3
 top_n = 64
 k_end = 10
 kappa = 1.4435159628028926
-lottery = 2.2434539801540128
+lottery = 1.95361356000101
 play_k = 5
 epsilon = -3.294140405079368
 min_play_len = 7

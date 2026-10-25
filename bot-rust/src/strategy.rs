@@ -522,32 +522,36 @@ impl Brain {
         let rho = self.rho(letters_left);
         let total: u32 = rack.iter().map(|&c| c as u32).sum();
         let mask = mask_of(rack);
+        // Per letter: the chance of winning `short` more copies, by short.
+        let mut tail = [[1.0f64; 5]; 26];
+        for (k, t) in tail.iter_mut().enumerate() {
+            for (short, v) in t.iter_mut().enumerate().skip(1) {
+                *v = poisson_tail(usable[k] * th.omega[tier(k)], short as u32);
+            }
+        }
         // A min-heap on ev holding the top_n best so far.
         let mut top: BinaryHeap<Worst> = BinaryHeap::with_capacity(th.top_n + 1);
         for i in idx.start_at_len(total + th.max_missing)..idx.words.len() {
             if (idx.masks[i] & !mask).count_ones() > th.max_missing {
                 continue;
             }
-            let c = idx.counts(i);
-            let mut missing = 0u32;
-            for k in 0..26 {
-                missing += c[k].saturating_sub(rack[k]) as u32;
+            let s = idx.score[i] as f64;
+            // ev is at most s * (1 + rho), so skip what can't make the cut.
+            if top.len() == th.top_n && s * (1.0 + rho) <= top.peek().map_or(0.0, |w| w.0.ev) {
+                continue;
             }
+            let letters = idx.letters(i);
+            let missing: u32 = letters.iter().map(|&(k, n)| n.saturating_sub(rack[k as usize]) as u32).sum();
             if missing > th.max_missing {
                 continue;
             }
-            let s = idx.score[i] as f64;
             let mut p = 1.0;
             let mut cost = 0.0;
-            if missing > 0 {
-                for k in 0..26 {
-                    let short = c[k].saturating_sub(rack[k]);
-                    if short == 0 {
-                        continue;
-                    }
-                    let t = tier(k);
-                    p *= poisson_tail(usable[k] * th.omega[t], short as u32);
-                    cost += short as f64 * self.prices[t];
+            for &(k, n) in letters {
+                let short = n.saturating_sub(rack[k as usize]);
+                if short > 0 {
+                    p *= tail[k as usize][(short as usize).min(4)];
+                    cost += short as f64 * self.prices[tier(k as usize)];
                 }
             }
             let ev = if missing == 0 {
@@ -561,6 +565,7 @@ impl Brain {
             if top.len() == th.top_n && ev <= top.peek().map_or(0.0, |w| w.0.ev) {
                 continue;
             }
+            let c = idx.counts(i);
             let mut used = [0u8; 26];
             for k in 0..26 {
                 used[k] = c[k].min(rack[k]);
@@ -762,6 +767,8 @@ pub struct WordIndex {
     pub score: Vec<u16>,
     pub lens: Vec<u8>,
     start: Vec<usize>,
+    letters: Vec<(u8, u8)>, // per word its distinct letters and counts, flat
+    letters_at: Vec<u32>,   // where each word's run starts in `letters`
 }
 
 impl WordIndex {
@@ -797,7 +804,18 @@ impl WordIndex {
             }
             *s = i;
         }
-        WordIndex { words, counts, masks, score, lens, start }
+        let mut letters = vec![];
+        let mut letters_at = Vec::with_capacity(n + 1);
+        for i in 0..n {
+            letters_at.push(letters.len() as u32);
+            for k in 0..26 {
+                if counts[i * 26 + k] > 0 {
+                    letters.push((k as u8, counts[i * 26 + k]));
+                }
+            }
+        }
+        letters_at.push(letters.len() as u32);
+        WordIndex { words, counts, masks, score, lens, start, letters, letters_at }
     }
 
     // The ENABLE wordlist the module validates words against.
@@ -806,6 +824,10 @@ impl WordIndex {
         INDEX
             .get_or_init(|| Arc::new(WordIndex::new(include_str!("../../spacetimedb/wordlist.txt"))))
             .clone()
+    }
+
+    fn letters(&self, i: usize) -> &[(u8, u8)] {
+        &self.letters[self.letters_at[i] as usize..self.letters_at[i + 1] as usize]
     }
 
     pub fn counts_of(&self, i: usize) -> &[u8] {
@@ -913,5 +935,28 @@ mod tests {
         b.word(&rack("AEINRSTLUOCDMPH"), 100.0, 1);
         let ms = start.elapsed().as_millis();
         assert!(ms < 100, "decisions took {ms} ms");
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn decision_cost() {
+        let mut b = Brain::new(WordIndex::shared(), 6, 1, Theta::load("theta.txt").unwrap());
+        let mut r = [0u8; 26];
+        for c in b"AEINRSTLO" {
+            r[code(*c) as usize] += 1;
+        }
+        b.bid(code(b'E'), &r, 100.0, 61); // builds the index
+        let start = std::time::Instant::now();
+        for left in (1..=60).cycle().take(std::env::var("BENCH_N").map_or(60, |n| n.parse().unwrap())) {
+            b.bid(code(b'E'), &r, 100.0, left);
+            b.word(&r, 100.0, left);
+        }
+        let n = std::env::var("BENCH_N").map_or(60.0, |n| n.parse().unwrap());
+        eprintln!("{:.2} ms per bid + word", start.elapsed().as_secs_f64() * 1000.0 / n);
     }
 }

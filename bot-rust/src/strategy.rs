@@ -57,6 +57,8 @@ pub struct Theta {
     pub endgame: u32,     // solve the last this-many playable auctions exactly (needs a market)
     pub early_k: f64,     // bids are scaled by this while more than early_left auctions are left
     pub early_left: u32,
+    pub starve_left: u32,     // starvation in the last this-many auctions (0: off)
+    pub starve_bid: [f64; 3], // the price it forces, by tier
     pub max_missing: u32, // furthest target words considered
     pub top_n: usize,    // target words kept per rack
     pub k_end: u32,      // auctions left when endgame escalation starts
@@ -96,6 +98,8 @@ impl Default for Theta {
             endgame: 0,
             early_k: 1.0,
             early_left: 45,
+            starve_left: 0,
+            starve_bid: [15.0, 24.0, 28.0],
             max_missing: 2,
             top_n: 64,
             k_end: 8,
@@ -111,9 +115,9 @@ impl Default for Theta {
 
 impl Theta {
     // Every parameter by name, as tuned and saved.
-    pub const NAMES: [&'static str; 40] = [
+    pub const NAMES: [&'static str; 44] = [
         "alpha0", "alpha_min", "alpha_max", "eta", "rho0", "omega0", "omega1", "omega2", "pi0", "pi1",
-        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "endgame", "early_k", "early_left", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
+        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "endgame", "early_k", "early_left", "starve_left", "starve0", "starve1", "starve2", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
         "min_play_len", "floor_k",
     ];
 
@@ -150,6 +154,10 @@ impl Theta {
             "endgame" => self.endgame as f64,
             "early_k" => self.early_k,
             "early_left" => self.early_left as f64,
+            "starve_left" => self.starve_left as f64,
+            "starve0" => self.starve_bid[0],
+            "starve1" => self.starve_bid[1],
+            "starve2" => self.starve_bid[2],
             "max_missing" => self.max_missing as f64,
             "top_n" => self.top_n as f64,
             "k_end" => self.k_end as f64,
@@ -199,6 +207,10 @@ impl Theta {
             "endgame" => self.endgame = int(0.0, 2.0) as u32,
             "early_k" => self.early_k = v.clamp(0.0, 2.0),
             "early_left" => self.early_left = int(0.0, 67.0) as u32,
+            "starve_left" => self.starve_left = int(0.0, 67.0) as u32,
+            "starve0" => self.starve_bid[0] = v.clamp(0.0, 100.0),
+            "starve1" => self.starve_bid[1] = v.clamp(0.0, 100.0),
+            "starve2" => self.starve_bid[2] = v.clamp(0.0, 100.0),
             "max_missing" => self.max_missing = int(1.0, 4.0) as u32,
             "top_n" => self.top_n = int(4.0, 256.0) as usize,
             "k_end" => self.k_end = int(1.0, 30.0) as u32,
@@ -264,6 +276,7 @@ pub struct Brain {
     market: Option<Arc<Market>>,
     leave: Option<Arc<Leave>>,
     final_scores: HashMap<Rack, f64>, // best_partition totals seen this match
+    leader_solvent: bool,
 }
 
 impl Brain {
@@ -287,6 +300,7 @@ impl Brain {
             market: None,
             leave: None,
             final_scores: HashMap::new(),
+            leader_solvent: false,
         }
     }
 
@@ -355,7 +369,21 @@ impl Brain {
         if letters_left > self.theta.early_left {
             return (bid as f64 * self.theta.early_k).round() as i64;
         }
+        // Starvation: late, while the leading rival can still pay, make it
+        // pay at least its usual late price for every tile, or take the tile.
+        // Spends only what's spare: coins are worth nothing once the bag is
+        // empty, so up to an even share of the balance per auction left.
+        let th = &self.theta;
+        if self.leader_solvent && letters_left >= 1 && letters_left <= th.starve_left {
+            let deny = th.starve_bid[tier(letter as usize)].min(balance / letters_left as f64).floor() as i64;
+            return bid.max(deny);
+        }
         bid
+    }
+
+    // Whether the top-scoring rival has coins to bid with, for starvation.
+    pub fn set_leader_solvent(&mut self, solvent: bool) {
+        self.leader_solvent = solvent;
     }
 
     fn bid_unshaded(&mut self, letter: u8, rack: &Rack, balance: f64, letters_left: u32) -> i64 {

@@ -162,7 +162,12 @@ fn try_bid(db: &RemoteTables, reducers: &RemoteReducers, st: &mut State, a: &Auc
     }
     let (rack, left) = (rack_for_match(db, a.match_id), letters_left(db, a.match_id));
     let letter = code(a.letter.as_bytes()[0]);
+    // The top-scoring rival in this match, and whether it still has coins.
+    let me = st.my_bot_id;
+    let leader = db.match_participant().iter().filter(|p| p.match_id == a.match_id && Some(p.bot_id) != me).max_by_key(|p| p.score);
+    let leader_solvent = leader.is_some_and(|p| p.balance >= 15);
     let Some(brain) = brain_for(db, st, a.match_id) else { return };
+    brain.set_leader_solvent(leader_solvent);
     let started = std::time::Instant::now();
     let amount = brain.bid(letter, &rack, balance as f64, left);
     if started.elapsed() > Duration::from_millis(200) {

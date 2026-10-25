@@ -160,6 +160,8 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
     let (mut won, mut spent, mut long_points, mut long_words) = (0u32, 0.0, 0i64, 0u32);
     let mut word_id = 0u64;
     let mut states = vec![];
+    let mut rival_score: HashMap<u64, i64> = m.seats.iter().filter(|s| s.0 != me).map(|s| (s.0, 0)).collect();
+    let mut rival_paid: HashMap<u64, i64> = HashMap::new();
     let mut long_by_stage = [0u32; 3];
     let mut won_by_stage = [0u32; 3];
     let mut next_word = 0;
@@ -191,6 +193,9 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
             word_id += 1;
             brain.note_word(u64::MAX - word_id, me, &w);
         }
+        // The top-scoring rival so far, and whether it still has coins.
+        let leader = rival_score.iter().max_by(|x, y| x.1.cmp(y.1)).map(|(b, _)| *b);
+        brain.set_leader_solvent(leader.is_some_and(|b| 100 - rival_paid.get(&b).copied().unwrap_or(0) + rival_score[&b] >= 15));
         let bid = brain.bid(a.letter, &rack, balance, left);
         if trace() {
             eprintln!(
@@ -219,6 +224,9 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
             won_by_stage[if left > 45 { 0 } else if left > 15 { 1 } else { 2 }] += 1;
             rack[a.letter as usize] += 1;
         }
+        if let Some(w) = winner.filter(|&w| w != me) {
+            *rival_paid.entry(w).or_insert(0) += paid;
+        }
         brain.note_result(a.id, a.letter, winner, paid as f64, balance, left);
         // Rivals' words played before the next auction closed.
         let until = m.auctions.get(i + 1).map(|b| b.closed_at.as_str());
@@ -226,6 +234,8 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
             let (_, bot, w) = &m.words[next_word];
             if *bot != me {
                 brain.note_word(next_word as u64, *bot, w);
+                let base: u32 = w.iter().map(|&k| LETTER_VALUE[k as usize] as u32).sum();
+                *rival_score.entry(*bot).or_insert(0) += word_score(base, w.len()) as i64;
             }
             next_word += 1;
         }

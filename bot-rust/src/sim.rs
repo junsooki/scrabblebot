@@ -11,6 +11,7 @@
 // scenario of one decision shares the same rollouts, so their difference is
 // mostly signal.
 
+use crate::leave::Leave;
 use crate::strategy::{Rack, WordIndex, LETTER_VALUE};
 use std::collections::BinaryHeap;
 
@@ -178,7 +179,9 @@ pub fn futures(rng: &mut Rng, market: &Market, unseen: &[f64; 26], auctions: usi
 // Points the policy scores in one rollout from here. Tiles still held at the
 // end count `dump` points per point of face value (short words in the
 // final dump).
-pub fn rollout(targets: &[Target], rack: &Rack, balance: f64, future: &Future, reserve: &[f64; 26], dump: f64) -> f64 {
+// With `leaf`, the rollout stops short of the end and the leave table
+// prices what it holds there (rack and coins, `left` auctions still to go).
+pub fn rollout(targets: &[Target], rack: &Rack, balance: f64, future: &Future, reserve: &[f64; 26], dump: f64, leaf: Option<(&Leave, u32)>) -> f64 {
     let mut rack = *rack;
     let mut balance = balance;
     let mut score = 0.0;
@@ -197,6 +200,9 @@ pub fn rollout(targets: &[Target], rack: &Rack, balance: f64, future: &Future, r
         balance -= price;
         rack[k] += 1;
         play_done(targets, &mut alive, &mut rack, &mut balance, &mut score, Some(k));
+    }
+    if let Some((leave, left)) = leaf {
+        return score + leave.value(&rack, left, balance);
     }
     let leftover: f64 = (0..26).map(|m| rack[m] as f64 * LETTER_VALUE[m] as f64).sum();
     score + dump * leftover
@@ -220,6 +226,7 @@ fn play_done(targets: &[Target], alive: &mut [bool], rack: &mut Rack, balance: &
     }
 }
 
-pub fn mean_rollout(targets: &[Target], rack: &Rack, balance: f64, futures: &[Future], reserve: &[f64; 26], dump: f64) -> f64 {
-    futures.iter().map(|f| rollout(targets, rack, balance, f, reserve, dump)).sum::<f64>() / futures.len().max(1) as f64
+#[allow(clippy::too_many_arguments)]
+pub fn mean_rollout(targets: &[Target], rack: &Rack, balance: f64, futures: &[Future], reserve: &[f64; 26], dump: f64, leaf: Option<(&Leave, u32)>) -> f64 {
+    futures.iter().map(|f| rollout(targets, rack, balance, f, reserve, dump, leaf)).sum::<f64>() / futures.len().max(1) as f64
 }

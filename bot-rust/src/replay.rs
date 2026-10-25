@@ -11,6 +11,7 @@
 // rival doesn't cost them anything here; that makes the score to beat a
 // little harder than it really is.
 
+use crate::leave::Leave;
 use crate::sim::Market;
 use crate::strategy::{code, word_score, Brain, Rack, Theta, WordIndex, FULL_BAG, LETTER_VALUE};
 use std::collections::HashMap;
@@ -87,6 +88,16 @@ pub fn load(dir: &str, from: u64, to: u64) -> Vec<Match> {
 
 pub use crate::sim::Rng;
 
+// A decision point: the seat's state as an auction opened, and the points
+// it scored from then to the end. What the leave table learns from.
+pub struct State {
+    pub rack: Rack,
+    pub left: u32,
+    pub balance: f64,
+    pub heuristic: f64, // the brain's own valuation of the rack then
+    pub future: f64,    // points scored from here on
+}
+
 pub struct Outcome {
     pub score: i64,
     pub won: u32,      // tiles won
@@ -98,18 +109,32 @@ pub struct Outcome {
     pub real: i64,     // the real occupant's score
     pub best_rival: i64,
     pub place: u32, // 1 is first; ties share the better place
+    pub states: Vec<State>, // filled when collecting
 }
 
 fn trace() -> bool {
     std::env::var("TRACE").is_ok()
 }
 
+// The learned rack value from `cargo run --bin learn`, if there is one
+// (LEAVE=<file>, default leave.txt).
+fn load_leave() -> Option<Arc<Leave>> {
+    let path = std::env::var("LEAVE").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/leave.txt").into());
+    Leave::load(&path).ok().map(Arc::new)
+}
+
+static LEAVE: std::sync::OnceLock<Option<Arc<Leave>>> = std::sync::OnceLock::new();
+
 const SOMEONE: u64 = u64::MAX; // a rival who won a tile the real occupant had
 
-pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m: &Match, seat: usize, rng: &mut Rng) -> Outcome {
+#[allow(clippy::too_many_arguments)]
+pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m: &Match, seat: usize, rng: &mut Rng, collect: bool) -> Outcome {
     let (me, real) = m.seats[seat];
     let mut brain = Brain::new(index.clone(), m.seats.len(), me, theta.clone());
     brain.set_market(market.clone());
+    if let Some(leave) = LEAVE.get_or_init(load_leave) {
+        brain.set_leave(leave.clone());
+    }
 
     // Starting tiles: whatever of the bag was never auctioned.
     let mut pool: Vec<u8> = vec![];
@@ -132,11 +157,16 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
     let mut score = 0i64;
     let (mut won, mut spent, mut long_points, mut long_words) = (0u32, 0.0, 0i64, 0u32);
     let mut word_id = 0u64;
+    let mut states = vec![];
     let mut next_word = 0;
     let n = m.auctions.len();
     for (i, a) in m.auctions.iter().enumerate() {
         let left = (n - i - 1) as u32;
         brain.note_auction(a.id, a.letter);
+        if collect {
+            let heuristic = brain.rack_value(&rack, left);
+            states.push(State { rack, left, balance, heuristic, future: score as f64 });
+        }
         while let Some(w) = brain.word(&rack, balance, left) {
             let mut base = 0;
             for &k in &w {
@@ -198,13 +228,21 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
     let best_rival = rivals.clone().max().unwrap_or(0);
     let place = 1 + rivals.filter(|&r| r > score).count() as u32;
     let unplayed = rack.iter().map(|&c| c as u32).sum();
-    Outcome { score, won, spent, left_over: balance, unplayed, long_points, long_words, real, best_rival, place }
+    for st in &mut states {
+        st.future = score as f64 - st.future;
+    }
+    Outcome { score, won, spent, left_over: balance, unplayed, long_points, long_words, real, best_rival, place, states }
 }
 
 
 // Every seat of every match, in parallel. Each match draws its starting
 // racks from its own seed, so two runs over the same matches are paired.
 pub fn evaluate(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, matches: &[Match]) -> Vec<Outcome> {
+    evaluate_with(index, market, theta, matches, 0, false)
+}
+
+// `seed` varies the starting racks; `collect` records every decision point.
+pub fn evaluate_with(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, matches: &[Match], seed: u64, collect: bool) -> Vec<Outcome> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
@@ -212,9 +250,9 @@ pub fn evaluate(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, mat
                 s.spawn(move || {
                     let mut out = vec![];
                     for m in matches.iter().skip(t).step_by(threads) {
-                        let mut rng = Rng(m.id);
+                        let mut rng = Rng(m.id ^ seed.wrapping_mul(0x9e3779b97f4a7c15));
                         for seat in 0..m.seats.len() {
-                            out.push(play_seat(index, market, theta, m, seat, &mut rng));
+                            out.push(play_seat(index, market, theta, m, seat, &mut rng, collect));
                         }
                     }
                     out

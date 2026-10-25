@@ -12,6 +12,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
+use crate::leave::Leave;
 use crate::sim::{self, Market};
 
 pub type Rack = [u8; 26];
@@ -43,6 +44,7 @@ pub struct Theta {
     pub flex: f64,       // weight of the alternatives to the best target word
     pub cash_target: f64, // coins below which cashing in a word gets a bonus
     pub boost: [f64; 3], // bid multiplier, by tier
+    pub leave: f64,       // weight of the learned rack value (src/leave.rs) against the plans'
     pub sim: f64,         // 1: a tile's gain by Monte Carlo rollouts (src/sim.rs); 2: the whole bid
     pub sim_rollouts: usize,
     pub sim_missing: u32, // furthest target words a rollout works towards
@@ -51,6 +53,7 @@ pub struct Theta {
     pub sim_dump: f64,    // points per face-value point of tiles left at the end
     pub sim_coins: f64,   // extra coins used to price a coin
     pub sim_floor: f64,   // a coin is worth at least this × 1/alpha points
+    pub sim_horizon: u32, // auctions a rollout plays before the leave table prices it (0: to the end)
     pub max_missing: u32, // furthest target words considered
     pub top_n: usize,    // target words kept per rack
     pub k_end: u32,      // auctions left when endgame escalation starts
@@ -77,6 +80,7 @@ impl Default for Theta {
             flex: 0.0,
             cash_target: 0.0,
             boost: [1.0, 1.0, 1.0],
+            leave: 0.0,
             sim: 0.0,
             sim_rollouts: 48,
             sim_missing: 4,
@@ -85,6 +89,7 @@ impl Default for Theta {
             sim_dump: 0.5,
             sim_coins: 20.0,
             sim_floor: 1.0,
+            sim_horizon: 0,
             max_missing: 2,
             top_n: 64,
             k_end: 8,
@@ -100,9 +105,9 @@ impl Default for Theta {
 
 impl Theta {
     // Every parameter by name, as tuned and saved.
-    pub const NAMES: [&'static str; 35] = [
+    pub const NAMES: [&'static str; 37] = [
         "alpha0", "alpha_min", "alpha_max", "eta", "rho0", "omega0", "omega1", "omega2", "pi0", "pi1",
-        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
+        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
         "min_play_len", "floor_k",
     ];
 
@@ -126,6 +131,7 @@ impl Theta {
             "boost0" => self.boost[0],
             "boost1" => self.boost[1],
             "boost2" => self.boost[2],
+            "leave" => self.leave,
             "sim" => self.sim,
             "sim_rollouts" => self.sim_rollouts as f64,
             "sim_missing" => self.sim_missing as f64,
@@ -134,6 +140,7 @@ impl Theta {
             "sim_dump" => self.sim_dump,
             "sim_coins" => self.sim_coins,
             "sim_floor" => self.sim_floor,
+            "sim_horizon" => self.sim_horizon as f64,
             "max_missing" => self.max_missing as f64,
             "top_n" => self.top_n as f64,
             "k_end" => self.k_end as f64,
@@ -169,6 +176,7 @@ impl Theta {
             "boost0" => self.boost[0] = v.clamp(0.1, 5.0),
             "boost1" => self.boost[1] = v.clamp(0.1, 5.0),
             "boost2" => self.boost[2] = v.clamp(0.1, 5.0),
+            "leave" => self.leave = v.clamp(0.0, 1.0),
             "sim" => self.sim = v,
             "sim_rollouts" => self.sim_rollouts = int(4.0, 1000.0) as usize,
             "sim_missing" => self.sim_missing = int(1.0, 7.0) as u32,
@@ -177,6 +185,7 @@ impl Theta {
             "sim_dump" => self.sim_dump = v.clamp(0.0, 3.0),
             "sim_coins" => self.sim_coins = v.clamp(1.0, 100.0),
             "sim_floor" => self.sim_floor = v.clamp(0.0, 5.0),
+            "sim_horizon" => self.sim_horizon = int(0.0, 70.0) as u32,
             "max_missing" => self.max_missing = int(1.0, 4.0) as u32,
             "top_n" => self.top_n = int(4.0, 256.0) as usize,
             "k_end" => self.k_end = int(1.0, 30.0) as u32,
@@ -240,6 +249,7 @@ pub struct Brain {
     plan_cache: HashMap<Rack, Arc<Vec<Plan>>>,
     plan_cache_left: i64,
     market: Option<Arc<Market>>,
+    leave: Option<Arc<Leave>>,
 }
 
 impl Brain {
@@ -261,7 +271,17 @@ impl Brain {
             plan_cache: HashMap::new(),
             plan_cache_left: -1,
             market: None,
+            leave: None,
         }
+    }
+
+    // The learned rack value (src/leave.rs) that theta.leave mixes in.
+    pub fn set_leave(&mut self, leave: Arc<Leave>) {
+        self.leave = Some(leave);
+    }
+
+    fn leave_mix(&self) -> f64 {
+        if self.leave.is_some() { self.theta.leave } else { 0.0 }
     }
 
     // The rival bids rollouts draw from; without one, bids use the formula.
@@ -326,9 +346,19 @@ impl Brain {
         }
         let mut r = *rack;
         self.set_rack(&r);
-        let before = self.value(&r, letters_left, true);
-        r[letter as usize] += 1;
-        let mut gain = self.value(&r, letters_left, false) - before;
+        let mix = self.leave_mix();
+        let mut gain = 0.0;
+        if mix < 1.0 {
+            let before = self.value(&r, letters_left, true);
+            r[letter as usize] += 1;
+            gain = (1.0 - mix) * (self.value(&r, letters_left, false) - before);
+            r[letter as usize] -= 1;
+        }
+        if let Some(leave) = self.leave.clone().filter(|_| mix > 0.0) {
+            let mut with = r;
+            with[letter as usize] += 1;
+            gain += mix * (leave.value(&with, letters_left, balance) - leave.value(&r, letters_left, balance));
+        }
         // sim 1: the points the tile adds, measured by rollouts.
         if let Some(market) = &market {
             gain = self.sim_bid(market, letter, rack, balance, letters_left).0;
@@ -372,7 +402,10 @@ impl Brain {
             return Some(idx.words[words.first().copied().unwrap_or(first)].clone());
         }
         let rho = self.rho(letters_left);
-        let hold = self.value(&r, letters_left, true);
+        let mix = self.leave_mix();
+        let leave = self.leave.clone().filter(|_| mix > 0.0);
+        let hold = if mix < 1.0 { (1.0 - mix) * self.value(&r, letters_left, true) } else { 0.0 }
+            + leave.as_ref().map_or(0.0, |l| mix * l.value(&r, letters_left, balance));
         // Short of money, a word's coins now are worth more than a better
         // word later: every auction we can't bid in is a tile lost.
         let cash_target = self.prices[0].max(self.theta.cash_target);
@@ -385,7 +418,15 @@ impl Brain {
             for k in 0..26 {
                 rest[k] -= c[k];
             }
-            let equity = idx.score[i] as f64 * (1.0 + rho) + self.value(&rest, letters_left, false) + low_cash;
+            let score = idx.score[i] as f64;
+            let mut equity = 0.0;
+            if mix < 1.0 {
+                equity += (1.0 - mix) * (score * (1.0 + rho) + self.value(&rest, letters_left, false) + low_cash);
+            }
+            // The table counts the word's coins through the balance it sees.
+            if let Some(l) = &leave {
+                equity += mix * (score + l.value(&rest, letters_left, balance + score));
+            }
             if equity > best_equity {
                 best_equity = equity;
                 best = i;
@@ -411,19 +452,32 @@ impl Brain {
         }
         let mut rng = sim::Rng(seed);
         // The last auction's tile can never be played, so skip it.
-        let auctions = letters_left.saturating_sub(1) as usize;
+        let mut auctions = letters_left.saturating_sub(1) as usize;
+        // With a leave table, look sim_horizon auctions ahead and let it
+        // price the rest.
+        let leave = self.leave.clone().filter(|_| th.sim_horizon > 0);
+        if leave.is_some() {
+            auctions = auctions.min(th.sim_horizon as usize);
+        }
+        let leaf = leave.as_deref().map(|l| (l, letters_left - auctions as u32));
         let futures = sim::futures(&mut rng, market, &unseen, auctions, th.sim_rollouts);
         let mut reserve = [0.0; 26];
         for (k, r) in reserve.iter_mut().enumerate() {
             *r = market.quantile(k, th.sim_reserve);
         }
-        let v = |r: &Rack, b: f64| sim::mean_rollout(&targets, r, b, &futures, &reserve, th.sim_dump);
+        let v = |r: &Rack, b: f64| sim::mean_rollout(&targets, r, b, &futures, &reserve, th.sim_dump, leaf);
         let without = v(rack, balance);
         let gain = v(&with, balance) - without;
         // Rollouts see one word ahead, so they undervalue money that would
         // fund the word after; the paced exchange rate floors a coin's worth.
         let per_coin = ((v(rack, balance + th.sim_coins) - without) / th.sim_coins).max(th.sim_floor / self.alpha);
         (gain, (gain / per_coin).clamp(0.0, balance).round() as i64)
+    }
+
+    // The brain's valuation of a rack, in points.
+    pub fn rack_value(&mut self, rack: &Rack, letters_left: u32) -> f64 {
+        self.set_rack(rack);
+        self.value(rack, letters_left, false)
     }
 
     // Valuation.

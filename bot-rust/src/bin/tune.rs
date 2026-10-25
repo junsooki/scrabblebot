@@ -1,6 +1,9 @@
 // Learn the strategy's parameters offline, continuously, from real matches.
 //
-//   cargo run --release --bin tune -- [--theta theta.txt] [--refresh-minutes 30]
+//   cargo run --release --bin tune -- [--theta theta.txt] [--refresh-minutes 30] [--matches N]
+//
+// --matches keeps only the newest N matches, for speed and to follow the
+// field as it is now.
 //
 // A (1+1) evolution strategy: mutate a few parameters of the best theta so
 // far, replay it in every seat of the training matches (see src/replay.rs),
@@ -23,7 +26,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 // Parameters worth tuning, with the scale of a typical step.
-const TUNED: [(&str, f64); 25] = [
+const TUNED: [(&str, f64); 30] = [
     ("alpha0", 0.3),
     ("alpha_min", 0.2),
     ("alpha_max", 0.5),
@@ -49,6 +52,11 @@ const TUNED: [(&str, f64); 25] = [
     ("boost0", 0.15),
     ("boost1", 0.2),
     ("boost2", 0.3),
+    ("sim_horizon", 2.0),
+    ("sim_reserve", 0.08),
+    ("sim_coins", 5.0),
+    ("sim_missing", 1.0),
+    ("sim_targets", 60.0),
 ];
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/replays");
@@ -59,6 +67,11 @@ fn split(matches: Vec<Match>) -> (Vec<Match>, Vec<Match>) {
         if is_held_out(&m) { test.push(m) } else { train.push(m) }
     }
     (train, test)
+}
+
+fn keep_newest(mut matches: Vec<Match>, n: usize) -> Vec<Match> {
+    matches.drain(..matches.len().saturating_sub(n));
+    matches
 }
 
 fn refresh() {
@@ -73,12 +86,14 @@ fn refresh() {
 fn main() {
     let mut path = concat!(env!("CARGO_MANIFEST_DIR"), "/theta.txt").to_string();
     let mut refresh_every = Duration::from_secs(30 * 60);
+    let mut newest = usize::MAX;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().expect("missing value");
         match a.as_str() {
             "--theta" => path = val(),
             "--refresh-minutes" => refresh_every = Duration::from_secs(val().parse::<u64>().unwrap() * 60),
+            "--matches" => newest = val().parse().unwrap(),
             _ => panic!("unknown argument {a}"),
         }
     }
@@ -93,7 +108,7 @@ fn main() {
 
     let index = WordIndex::shared();
     let mut best = Theta::load(&path).unwrap_or_default();
-    let all = load(DIR, 0, u64::MAX);
+    let all = keep_newest(load(DIR, 0, u64::MAX), newest);
     let mut rivals = Arc::new(market(&all));
     rivals.save(&market_path).unwrap();
     let (mut train, mut test) = split(all);
@@ -117,7 +132,7 @@ fn main() {
         if last_refresh.elapsed() >= refresh_every {
             last_refresh = Instant::now();
             refresh();
-            let all = load(DIR, 0, u64::MAX);
+            let all = keep_newest(load(DIR, 0, u64::MAX), newest);
             rivals = Arc::new(market(&all));
             rivals.save(&market_path).unwrap();
             (train, test) = split(all);

@@ -26,7 +26,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 // Parameters worth tuning, with the scale of a typical step.
-const TUNED: [(&str, f64); 30] = [
+const TUNED: [(&str, f64); 31] = [
     ("alpha0", 0.3),
     ("alpha_min", 0.2),
     ("alpha_max", 0.5),
@@ -57,6 +57,7 @@ const TUNED: [(&str, f64); 30] = [
     ("sim_coins", 5.0),
     ("sim_missing", 1.0),
     ("sim_targets", 60.0),
+    ("endgame", 1.0),
 ];
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/replays");

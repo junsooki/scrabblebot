@@ -54,6 +54,7 @@ pub struct Theta {
     pub sim_coins: f64,   // extra coins used to price a coin
     pub sim_floor: f64,   // a coin is worth at least this × 1/alpha points
     pub sim_horizon: u32, // auctions a rollout plays before the leave table prices it (0: to the end)
+    pub endgame: u32,     // solve the last this-many playable auctions exactly (needs a market)
     pub max_missing: u32, // furthest target words considered
     pub top_n: usize,    // target words kept per rack
     pub k_end: u32,      // auctions left when endgame escalation starts
@@ -90,6 +91,7 @@ impl Default for Theta {
             sim_coins: 20.0,
             sim_floor: 1.0,
             sim_horizon: 0,
+            endgame: 0,
             max_missing: 2,
             top_n: 64,
             k_end: 8,
@@ -105,9 +107,9 @@ impl Default for Theta {
 
 impl Theta {
     // Every parameter by name, as tuned and saved.
-    pub const NAMES: [&'static str; 37] = [
+    pub const NAMES: [&'static str; 38] = [
         "alpha0", "alpha_min", "alpha_max", "eta", "rho0", "omega0", "omega1", "omega2", "pi0", "pi1",
-        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
+        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "endgame", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
         "min_play_len", "floor_k",
     ];
 
@@ -141,6 +143,7 @@ impl Theta {
             "sim_coins" => self.sim_coins,
             "sim_floor" => self.sim_floor,
             "sim_horizon" => self.sim_horizon as f64,
+            "endgame" => self.endgame as f64,
             "max_missing" => self.max_missing as f64,
             "top_n" => self.top_n as f64,
             "k_end" => self.k_end as f64,
@@ -186,6 +189,7 @@ impl Theta {
             "sim_coins" => self.sim_coins = v.clamp(1.0, 100.0),
             "sim_floor" => self.sim_floor = v.clamp(0.0, 5.0),
             "sim_horizon" => self.sim_horizon = int(0.0, 70.0) as u32,
+            "endgame" => self.endgame = int(0.0, 4.0) as u32,
             "max_missing" => self.max_missing = int(1.0, 4.0) as u32,
             "top_n" => self.top_n = int(4.0, 256.0) as usize,
             "k_end" => self.k_end = int(1.0, 30.0) as u32,
@@ -250,6 +254,7 @@ pub struct Brain {
     plan_cache_left: i64,
     market: Option<Arc<Market>>,
     leave: Option<Arc<Leave>>,
+    final_scores: HashMap<Rack, f64>, // best_partition totals seen this match
 }
 
 impl Brain {
@@ -272,6 +277,7 @@ impl Brain {
             plan_cache_left: -1,
             market: None,
             leave: None,
+            final_scores: HashMap::new(),
         }
     }
 
@@ -337,6 +343,12 @@ impl Brain {
         // The final tile arrives as the match ends and can never be played.
         if letters_left == 0 || balance <= 0.0 {
             return 0;
+        }
+        // The last few auctions: solve them exactly instead.
+        if let Some(market) = self.market.clone() {
+            if self.theta.endgame > 0 && letters_left <= self.theta.endgame + 1 {
+                return self.endgame_bid(&market, letter, rack, balance, letters_left);
+            }
         }
         let market = self.market.clone().filter(|_| self.theta.sim > 0.5);
         if let Some(market) = &market {
@@ -472,6 +484,90 @@ impl Brain {
         // fund the word after; the paced exchange rate floors a coin's worth.
         let per_coin = ((v(rack, balance + th.sim_coins) - without) / th.sim_coins).max(th.sim_floor / self.alpha);
         (gain, (gain / per_coin).clamp(0.0, balance).round() as i64)
+    }
+
+    // Expectimax over the rest of the match, once few enough auctions are
+    // left: chance picks each letter (from the unseen ones) and the best
+    // rival bid on it (from the market, at five quantiles); we decide whether
+    // to buy at that price; at the end the rack scores its best set of words
+    // (best_partition). Taking a tile exactly when it's worth more than its
+    // price is what bidding our indifference price does in a Vickrey auction,
+    // so the bid is the most we'd pay and still do as well as passing.
+    fn endgame_bid(&mut self, market: &Market, letter: u8, rack: &Rack, balance: f64, letters_left: u32) -> i64 {
+        // The final tile can never be played.
+        if letters_left == 0 || balance <= 0.0 {
+            return 0;
+        }
+        self.rack = *rack;
+        let unseen = self.usable(letters_left);
+        let total: f64 = unseen.iter().sum();
+        let chances: Vec<(usize, f64, [f64; 5])> = (0..26)
+            .filter(|&k| unseen[k] > 0.0)
+            .map(|k| {
+                let mut t = [0.0; 5];
+                for (j, q) in t.iter_mut().enumerate() {
+                    *q = market.quantile(k, 0.1 + 0.2 * j as f64).max(1.0);
+                }
+                (k, unseen[k] / total, t)
+            })
+            .collect();
+        // Playable auctions after this one: all but the very last.
+        let depth = letters_left - 1;
+        let mut memo = HashMap::new();
+        let mut with = *rack;
+        with[letter as usize] += 1;
+        let pass = self.expecti(&chances, rack, balance, depth, &mut memo);
+        if self.expecti(&chances, &with, balance, depth, &mut memo) <= pass {
+            return 0; // no use even free
+        }
+        // The most we can pay and still do as well as passing.
+        let (mut lo, mut hi) = (0i64, balance as i64);
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            if self.expecti(&chances, &with, balance - mid as f64, depth, &mut memo) >= pass {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    }
+
+    fn expecti(&mut self, chances: &[(usize, f64, [f64; 5])], rack: &Rack, balance: f64, depth: u32, memo: &mut HashMap<(Rack, i32, u32), f64>) -> f64 {
+        if depth == 0 {
+            return self.final_score(rack);
+        }
+        // Coins in steps of 2: close enough, and far fewer positions.
+        let key = (*rack, (balance / 2.0).floor() as i32, depth);
+        if let Some(&v) = memo.get(&key) {
+            return v;
+        }
+        let pass = self.expecti(chances, rack, balance, depth - 1, memo);
+        let mut v = 0.0;
+        for &(k, w, prices) in chances {
+            let mut with = *rack;
+            with[k] += 1;
+            let mut sum = 0.0;
+            for t in prices {
+                let take = if t <= balance { self.expecti(chances, &with, balance - t, depth - 1, memo) } else { pass };
+                sum += take.max(pass);
+            }
+            v += w * sum / 5.0;
+        }
+        memo.insert(key, v);
+        v
+    }
+
+    // The most the rack scores as disjoint words, remembered per rack for
+    // the whole match: endgame searches keep meeting the same racks.
+    fn final_score(&mut self, rack: &Rack) -> f64 {
+        if let Some(&v) = self.final_scores.get(rack) {
+            return v;
+        }
+        let idx = self.index.clone();
+        let v = best_partition(&idx, rack, self.formable(rack)).iter().map(|&i| idx.score[i] as f64).sum();
+        self.final_scores.insert(*rack, v);
+        v
     }
 
     // The brain's valuation of a rack, in points.

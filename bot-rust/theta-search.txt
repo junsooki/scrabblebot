@@ -36,4 +36,4 @@ play_k = 5
 epsilon = -3.294140405079368
 min_play_len = 7
 floor_k = 0.754430057031048
-endgame = 3
+endgame = 2

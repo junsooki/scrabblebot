@@ -189,7 +189,8 @@ impl Theta {
             "sim_coins" => self.sim_coins = v.clamp(1.0, 100.0),
             "sim_floor" => self.sim_floor = v.clamp(0.0, 5.0),
             "sim_horizon" => self.sim_horizon = int(0.0, 70.0) as u32,
-            "endgame" => self.endgame = int(0.0, 4.0) as u32,
+            // Deeper takes over a second the first time, too slow for an auction.
+            "endgame" => self.endgame = int(0.0, 2.0) as u32,
             "max_missing" => self.max_missing = int(1.0, 4.0) as u32,
             "top_n" => self.top_n = int(4.0, 256.0) as usize,
             "k_end" => self.k_end = int(1.0, 30.0) as u32,

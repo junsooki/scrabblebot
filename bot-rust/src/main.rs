@@ -15,16 +15,19 @@
 // Entering a tournament: `TOURNAMENT_ID=<id>` registers the bot when it
 // connects. `THETA=<file>` (default theta.txt here) holds the strategy's
 // parameters; it's read at the start of every match, so `cargo run --bin
-// tune` can improve a running bot.
+// tune` can improve a running bot. THETA=theta-search.txt plays the search
+// strategy, which also needs market.txt and leave.txt (see below).
 
 mod module_bindings;
 
+use bot_rust::leave::Leave;
+use bot_rust::sim::Market;
 use bot_rust::strategy::{code, spell, Brain, Rack, Theta, WordIndex};
 use module_bindings::*;
 use spacetimedb_sdk::{DbContext, Event, Identity, Table, TableWithPrimaryKey, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 fn env(name: &str) -> Option<String> {
@@ -66,6 +69,26 @@ fn state() -> MutexGuard<'static, State> {
 
 macro_rules! log {
     ($($arg:tt)*) => { println!("[{}] {}", bot_name(), format!($($arg)*)) };
+}
+
+// MARKET=<file> (default market.txt, written by the tuner) and LEAVE=<file>
+// (default leave.txt, from `cargo run --bin learn`) feed the search.
+fn market_path() -> String {
+    env("MARKET").unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/market.txt").into())
+}
+
+fn leave_path() -> String {
+    env("LEAVE").unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/leave.txt").into())
+}
+
+fn data<T>(path: &str, load: fn(&str) -> std::io::Result<T>) -> Option<Arc<T>> {
+    match load(path) {
+        Ok(v) => Some(Arc::new(v)),
+        Err(e) => {
+            log!("no {path} ({e})");
+            None
+        }
+    }
 }
 
 // A reducer call fails when the module refuses it, often for an expected
@@ -116,7 +139,15 @@ fn brain_for<'a>(db: &RemoteTables, st: &'a mut State, match_id: u64) -> Option<
             log!("no theta at {} ({e}); using defaults", theta_path());
             Theta::default()
         });
-        Brain::new(WordIndex::shared(), players, me, theta)
+        let mut brain = Brain::new(WordIndex::shared(), players, me, theta);
+        // The rollouts' rival bids and leaf values, when present (theta-search.txt uses both).
+        if let Some(m) = data(&market_path(), Market::load) {
+            brain.set_market(m);
+        }
+        if let Some(l) = data(&leave_path(), Leave::load) {
+            brain.set_leave(l);
+        }
+        brain
     }))
 }
 
@@ -131,7 +162,11 @@ fn try_bid(db: &RemoteTables, reducers: &RemoteReducers, st: &mut State, a: &Auc
     let (rack, left) = (rack_for_match(db, a.match_id), letters_left(db, a.match_id));
     let letter = code(a.letter.as_bytes()[0]);
     let Some(brain) = brain_for(db, st, a.match_id) else { return };
+    let started = std::time::Instant::now();
     let amount = brain.bid(letter, &rack, balance as f64, left);
+    if started.elapsed() > Duration::from_millis(200) {
+        log!("slow bid: {} ms", started.elapsed().as_millis());
+    }
     let alpha = brain.alpha;
     if amount <= st.bids.get(&a.id).copied().unwrap_or(0) {
         return;

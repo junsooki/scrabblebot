@@ -10,3 +10,12 @@ target/
 bot-starter/src/module_bindings/
 .vercel
 .env*
+
+# Rust bot: downloaded match history and tuner output (theta.txt is tracked)
+bot-rust/replays/
+bot-rust/tune.out
+bot-rust/theta.txt.log
+bot-rust/theta.txt.tmp
+bot-rust/dwight.log
+bot-rust/market.txt
+bot-rust/market.txt.tmp

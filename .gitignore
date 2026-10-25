@@ -25,3 +25,5 @@ bot-rust/theta-search.txt.tmp
 bot-rust/tune-search.out
 bot-rust/dwight-v2-old.log
 bot-rust/dwight-search.log
+bot-rust/theta-tournament.txt
+bot-rust/freeze.log

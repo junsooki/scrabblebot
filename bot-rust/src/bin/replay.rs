@@ -61,6 +61,7 @@ fn main() {
         mean(&|o| o.won_by_stage[1] as f64),
         mean(&|o| o.won_by_stage[2] as f64)
     );
+    println!("last place {:.3}", mean(&|o| (o.place == 6) as u8 as f64));
     let gap = |lo: i64, hi: i64| mean(&|o| (o.place > 1 && o.best_rival - o.score > lo && o.best_rival - o.score <= hi) as u8 as f64);
     println!("missed first by 1-5 points {:.3}, by 6-10 {:.3}, by 11-20 {:.3}", gap(0, 5), gap(5, 10), gap(10, 20));
     println!(

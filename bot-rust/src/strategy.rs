@@ -55,6 +55,8 @@ pub struct Theta {
     pub sim_floor: f64,   // a coin is worth at least this × 1/alpha points
     pub sim_horizon: u32, // auctions a rollout plays before the leave table prices it (0: to the end)
     pub endgame: u32,     // solve the last this-many playable auctions exactly (needs a market)
+    pub early_k: f64,     // bids are scaled by this while more than early_left auctions are left
+    pub early_left: u32,
     pub max_missing: u32, // furthest target words considered
     pub top_n: usize,    // target words kept per rack
     pub k_end: u32,      // auctions left when endgame escalation starts
@@ -92,6 +94,8 @@ impl Default for Theta {
             sim_floor: 1.0,
             sim_horizon: 0,
             endgame: 0,
+            early_k: 1.0,
+            early_left: 45,
             max_missing: 2,
             top_n: 64,
             k_end: 8,
@@ -107,9 +111,9 @@ impl Default for Theta {
 
 impl Theta {
     // Every parameter by name, as tuned and saved.
-    pub const NAMES: [&'static str; 38] = [
+    pub const NAMES: [&'static str; 40] = [
         "alpha0", "alpha_min", "alpha_max", "eta", "rho0", "omega0", "omega1", "omega2", "pi0", "pi1",
-        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "endgame", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
+        "pi2", "gamma", "stack", "flex", "cash_target", "boost0", "boost1", "boost2", "leave", "sim", "sim_rollouts", "sim_missing", "sim_targets", "sim_reserve", "sim_dump", "sim_coins", "sim_floor", "sim_horizon", "endgame", "early_k", "early_left", "max_missing", "top_n", "k_end", "kappa", "lottery", "play_k", "epsilon",
         "min_play_len", "floor_k",
     ];
 
@@ -144,6 +148,8 @@ impl Theta {
             "sim_floor" => self.sim_floor,
             "sim_horizon" => self.sim_horizon as f64,
             "endgame" => self.endgame as f64,
+            "early_k" => self.early_k,
+            "early_left" => self.early_left as f64,
             "max_missing" => self.max_missing as f64,
             "top_n" => self.top_n as f64,
             "k_end" => self.k_end as f64,
@@ -191,6 +197,8 @@ impl Theta {
             "sim_horizon" => self.sim_horizon = int(0.0, 70.0) as u32,
             // Deeper takes over a second the first time, too slow for an auction.
             "endgame" => self.endgame = int(0.0, 2.0) as u32,
+            "early_k" => self.early_k = v.clamp(0.0, 2.0),
+            "early_left" => self.early_left = int(0.0, 67.0) as u32,
             "max_missing" => self.max_missing = int(1.0, 4.0) as u32,
             "top_n" => self.top_n = int(4.0, 256.0) as usize,
             "k_end" => self.k_end = int(1.0, 30.0) as u32,
@@ -341,6 +349,16 @@ impl Brain {
     // Decisions.
 
     pub fn bid(&mut self, letter: u8, rack: &Rack, balance: f64, letters_left: u32) -> i64 {
+        let bid = self.bid_unshaded(letter, rack, balance, letters_left);
+        // The top late-game bots buy little while racks are still forming
+        // and keep their coins for the tiles that finish words.
+        if letters_left > self.theta.early_left {
+            return (bid as f64 * self.theta.early_k).round() as i64;
+        }
+        bid
+    }
+
+    fn bid_unshaded(&mut self, letter: u8, rack: &Rack, balance: f64, letters_left: u32) -> i64 {
         // The final tile arrives as the match ends and can never be played.
         if letters_left == 0 || balance <= 0.0 {
             return 0;

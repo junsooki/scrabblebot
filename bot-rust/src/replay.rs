@@ -106,6 +106,8 @@ pub struct Outcome {
     pub unplayed: u32, // tiles held at the end
     pub long_points: i64, // points from 7+ letter words
     pub long_words: u32,
+    pub long_by_stage: [u32; 3],
+    pub won_by_stage: [u32; 3], // tiles won, same stages // 7+ words played with >45, 16-45 and <=15 auctions left
     pub real: i64,     // the real occupant's score
     pub best_rival: i64,
     pub place: u32, // 1 is first; ties share the better place
@@ -158,6 +160,8 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
     let (mut won, mut spent, mut long_points, mut long_words) = (0u32, 0.0, 0i64, 0u32);
     let mut word_id = 0u64;
     let mut states = vec![];
+    let mut long_by_stage = [0u32; 3];
+    let mut won_by_stage = [0u32; 3];
     let mut next_word = 0;
     let n = m.auctions.len();
     for (i, a) in m.auctions.iter().enumerate() {
@@ -181,6 +185,7 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
             if w.len() >= 7 {
                 long_points += reward;
                 long_words += 1;
+                long_by_stage[if left > 45 { 0 } else if left > 15 { 1 } else { 2 }] += 1;
             }
             balance += reward as f64;
             word_id += 1;
@@ -211,6 +216,7 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
             balance -= paid as f64;
             spent += paid as f64;
             won += 1;
+            won_by_stage[if left > 45 { 0 } else if left > 15 { 1 } else { 2 }] += 1;
             rack[a.letter as usize] += 1;
         }
         brain.note_result(a.id, a.letter, winner, paid as f64, balance, left);
@@ -231,7 +237,7 @@ pub fn play_seat(index: &Arc<WordIndex>, market: &Arc<Market>, theta: &Theta, m:
     for st in &mut states {
         st.future = score as f64 - st.future;
     }
-    Outcome { score, won, spent, left_over: balance, unplayed, long_points, long_words, real, best_rival, place, states }
+    Outcome { score, won, spent, left_over: balance, unplayed, long_points, long_words, long_by_stage, won_by_stage, real, best_rival, place, states }
 }
 
 
